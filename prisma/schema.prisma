@@ -1,0 +1,59 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Ingredient {
+  id           Int         @id @default(autoincrement())
+  name         String      @unique
+  unit         String      // e.g., "grams", "ml", "pieces"
+  currentStock Float
+  parLevel     Float       // Minimum stock level
+  unitCost     Float       // Cost per unit
+  recipeItems  RecipeItem[]
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+}
+
+model MenuItem {
+  id        Int         @id @default(autoincrement())
+  name      String      @unique
+  basePrice Float
+  recipeItems RecipeItem[]
+  sales     Sale[]
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+}
+
+// Junction table linking MenuItem to Ingredient
+model RecipeItem {
+  id               Int       @id @default(autoincrement())
+  menuItemId       Int
+  ingredientId     Int
+  quantityRequired Float     // Amount of ingredient required for recipe
+  yieldFactor      Float     @default(1.0) // Factor to account for prep waste
+  // ActualDeduction = quantityRequired / yieldFactor
+  
+  menuItem         MenuItem  @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+  ingredient       Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  
+  @@unique([menuItemId, ingredientId])
+}
+
+model Sale {
+  id           Int      @id @default(autoincrement())
+  menuItemId   Int
+  quantitySold Int
+  createdAt    DateTime @default(now())
+  
+  menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+}
