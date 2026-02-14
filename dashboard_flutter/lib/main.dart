@@ -3,16 +3,17 @@ import 'package:provider/provider.dart';
 import 'package:socket_io_client/socket_io_client.dart' as IO;
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, defaultTargetPlatform, TargetPlatform;
 
 /// Resolves the API base URL based on the environment.
 ///
 /// Priority:
 /// 1. Compile-time env: --dart-define=API_URL=https://...
-/// 2. Auto-detect from browser origin (for Codespaces / deployed envs)
-/// 3. Fallback to localhost:3000
+/// 2. (Web) Auto-detect from browser origin (for Codespaces / deployed envs)
+/// 3. (Mobile) http://10.0.2.2:3000 for Android emulator, localhost:3000 for iOS sim
+/// 4. Fallback to localhost:3000
 String _resolveBaseUrl() {
-  // Check compile-time override first
+  // Check compile-time override first — REQUIRED for real-device mobile builds
   const envUrl = String.fromEnvironment('API_URL', defaultValue: '');
   if (envUrl.isNotEmpty) return envUrl;
 
@@ -30,6 +31,12 @@ String _resolveBaseUrl() {
       final uri = Uri.base;
       return '${uri.scheme}://${uri.host}:3000';
     } catch (_) {}
+  } else {
+    // Mobile: Android emulator uses 10.0.2.2 to reach host machine's localhost
+    // For iOS simulator, localhost works. For real devices, use --dart-define=API_URL
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      return 'http://10.0.2.2:3000';
+    }
   }
   return 'http://localhost:3000';
 }
@@ -679,7 +686,8 @@ class _OverviewDashboardState extends State<OverviewDashboard> {
             const SizedBox(height: 10),
             LayoutBuilder(
               builder: (context, constraints) {
-                final cardWidth = (constraints.maxWidth - 36) / 4;
+                final cols = constraints.maxWidth > 600 ? 4 : 2;
+                final cardWidth = (constraints.maxWidth - 12 * (cols - 1)) / cols;
                 return Wrap(
                   spacing: 12,
                   runSpacing: 12,
@@ -699,7 +707,8 @@ class _OverviewDashboardState extends State<OverviewDashboard> {
             const SizedBox(height: 10),
             LayoutBuilder(
               builder: (context, constraints) {
-                final cardWidth = (constraints.maxWidth - 36) / 4;
+                final cols = constraints.maxWidth > 600 ? 4 : 2;
+                final cardWidth = (constraints.maxWidth - 12 * (cols - 1)) / cols;
                 return Wrap(
                   spacing: 12,
                   runSpacing: 12,
@@ -800,7 +809,9 @@ class _OverviewDashboardState extends State<OverviewDashboard> {
                         padding: EdgeInsets.all(24),
                         child: Center(child: Text('No ingredients yet.')),
                       )
-                    : DataTable(
+                    : SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: DataTable(
                         headingRowColor: MaterialStateProperty.all(Colors.grey.shade100),
                         columnSpacing: 20,
                         columns: const [
@@ -843,6 +854,7 @@ class _OverviewDashboardState extends State<OverviewDashboard> {
                           ]);
                         }).toList(),
                       ),
+                    ),
               ),
             ),
             const SizedBox(height: 20),
