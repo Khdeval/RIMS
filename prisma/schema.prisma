@@ -18,6 +18,7 @@ model Ingredient {
   parLevel     Float       // Minimum stock level
   unitCost     Float       // Cost per unit
   recipeItems  RecipeItem[]
+  wasteLogs    WasteLog[]
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
 }
@@ -56,4 +57,14 @@ model Sale {
   createdAt    DateTime @default(now())
   
   menuItem     MenuItem @relation(fields: [menuItemId], references: [id], onDelete: Cascade)
+}
+
+model WasteLog {
+  id           Int      @id @default(autoincrement())
+  ingredientId Int
+  quantity     Float    // Amount wasted
+  reason       String   // e.g., "expired", "spilled", "prep waste", "damaged"
+  createdAt    DateTime @default(now())
+
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
 }

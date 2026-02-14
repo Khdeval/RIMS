@@ -2,30 +2,49 @@
   "name": "rims-backend",
   "version": "1.0.0",
   "description": "Restaurant Inventory Management System Backend",
-  "main": "dist/index.js",
+  "main": "dist/server.js",
   "scripts": {
-    "dev": "ts-node src/index.ts",
+    "dev": "ts-node src/server.ts",
+    "dev:api": "ts-node src/server.ts",
     "build": "tsc",
-    "start": "node dist/index.js",
-    "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "prisma:seed": "ts-node prisma/seed.ts",
-    "seed": "npm run prisma:seed"
+    "start": "node dist/server.js",
+    "start:api": "node dist/server.js",
+    "db:migrate": "prisma migrate deploy",
+    "db:migrate:dev": "prisma migrate dev",
+    "db:seed": "ts-node prisma/seed.ts",
+    "db:studio": "prisma studio",
+    "db:generate": "prisma generate",
+    "lint": "tsc --noEmit",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "docker:logs": "docker compose logs -f"
+  },
+  "prisma": {
+    "seed": "ts-node prisma/seed.ts"
+  },
+  "engines": {
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "@prisma/client": "^5.8.0",
-    "express": "^4.18.2"
+    "axios": "^1.13.5",
+    "compression": "^1.8.1",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^4.18.2",
+    "helmet": "^8.1.0",
+    "morgan": "^1.10.1",
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
+    "@types/compression": "^1.8.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.17",
+    "@types/morgan": "^1.9.10",
     "@types/node": "^20.10.6",
-    "typescript": "^5.3.3",
-    "ts-node": "^10.9.2",
+    "@types/socket.io": "^3.0.1",
     "prisma": "^5.8.0",
-    "@types/express": "^4.17.17"
-  }
-,
-  "scripts": {
-    "dev:api": "ts-node src/server.ts",
-    "start:api": "node dist/server.js"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
   }
 }

@@ -1,8 +1,16 @@
 // This file demonstrates how to implement key business logic with the RIMS schema
 
 import { PrismaClient } from "@prisma/client";
+import axios from 'axios';
 
 const prisma = new PrismaClient();
+
+export interface CloverItem {
+  id: string;
+  name: string;
+  price: number;
+  // Add more fields as needed from Clover API
+}
 
 /**
  * Calculate the actual deduction for a single unit of a recipe item
@@ -264,6 +272,28 @@ export async function generatePurchaseOrders() {
   }));
 }
 
+/**
+ * Upsert Clover inventory items into Ingredient table
+ */
+export async function upsertCloverInventory(items: CloverItem[]): Promise<void> {
+  for (const item of items) {
+    await prisma.ingredient.upsert({
+      where: { name: item.name },
+      update: {
+        // Optionally update other fields
+        // currentStock: ...
+      },
+      create: {
+        name: item.name,
+        unit: 'unit', // Default, adjust as needed
+        currentStock: 0, // Set to 0 or map from Clover if available
+        parLevel: 10, // Default, adjust as needed
+        unitCost: item.price / 100, // Clover price is in cents
+      },
+    });
+  }
+}
+
 // Example usage
 async function demo() {
   console.log("🍔 RIMS Business Logic Demo\n");
@@ -305,4 +335,14 @@ if (require.main === module) {
       await prisma.$disconnect();
       process.exit(1);
     });
+}
+
+export async function fetchCloverInventory(merchantId: string, accessToken: string): Promise<CloverItem[]> {
+  const url = `https://api.clover.com/v3/merchants/${merchantId}/items`;
+  const response = await axios.get(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+    },
+  });
+  return response.data.elements as CloverItem[];
 }
