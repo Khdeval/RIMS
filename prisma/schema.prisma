@@ -19,6 +19,7 @@ model Ingredient {
   unitCost     Float       // Cost per unit
   recipeItems  RecipeItem[]
   wasteLogs    WasteLog[]
+  stockIns     StockIn[]
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
 }
@@ -64,6 +65,21 @@ model WasteLog {
   ingredientId Int
   quantity     Float    // Amount wasted
   reason       String   // e.g., "expired", "spilled", "prep waste", "damaged"
+  createdAt    DateTime @default(now())
+
+  ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)
+}
+
+model StockIn {
+  id           Int      @id @default(autoincrement())
+  ingredientId Int
+  quantity     Float    // Amount stocked in
+  unitCost     Float?   // Cost per unit at time of purchase
+  totalCost    Float?   // Total cost for this stock-in
+  source       String   // e.g., "manual", "receipt_scan", "purchase_order"
+  invoiceRef   String?  // Invoice/receipt reference number
+  supplier     String?  // Supplier name
+  notes        String?  // Any additional notes
   createdAt    DateTime @default(now())
 
   ingredient   Ingredient @relation(fields: [ingredientId], references: [id], onDelete: Cascade)

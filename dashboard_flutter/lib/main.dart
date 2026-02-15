@@ -258,6 +258,94 @@ class ApiService {
     }
     throw Exception('Failed to load stock deductions');
   }
+
+  // Stock-In (Stock Taking)
+  static Future<List<dynamic>> getStockIns({int days = 90, int? ingredientId}) async {
+    String url = '$baseUrl/stock-ins?days=$days';
+    if (ingredientId != null) url += '&ingredientId=$ingredientId';
+    final response = await http.get(Uri.parse(url));
+    if (response.statusCode == 200) {
+      return json.decode(response.body);
+    }
+    throw Exception('Failed to load stock-ins');
+  }
+
+  static Future<dynamic> createStockIn({
+    required int ingredientId,
+    required double quantity,
+    double? unitCost,
+    String? source,
+    String? invoiceRef,
+    String? supplier,
+    String? notes,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/stock-ins'),
+      headers: {'Content-Type': 'application/json'},
+      body: json.encode({
+        'ingredientId': ingredientId,
+        'quantity': quantity,
+        if (unitCost != null) 'unitCost': unitCost,
+        'source': source ?? 'manual',
+        if (invoiceRef != null) 'invoiceRef': invoiceRef,
+        if (supplier != null) 'supplier': supplier,
+        if (notes != null) 'notes': notes,
+      }),
+    );
+    if (response.statusCode == 200 || response.statusCode == 201) {
+      return json.decode(response.body);
+    }
+    throw Exception('Failed to create stock-in');
+  }
+
+  static Future<dynamic> bulkStockIn({
+    required List<Map<String, dynamic>> items,
+    String? invoiceRef,
+    String? supplier,
+    String? source,
+  }) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/stock-ins/bulk'),
+      headers: {'Content-Type': 'application/json'},
+      body: json.encode({
+        'items': items,
+        if (invoiceRef != null) 'invoiceRef': invoiceRef,
+        if (supplier != null) 'supplier': supplier,
+        'source': source ?? 'receipt_scan',
+      }),
+    );
+    if (response.statusCode == 200 || response.statusCode == 201) {
+      return json.decode(response.body);
+    }
+    throw Exception('Failed to process bulk stock-in');
+  }
+
+  static Future<dynamic> parseReceipt(String receiptText) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/stock-ins/parse-receipt'),
+      headers: {'Content-Type': 'application/json'},
+      body: json.encode({'receiptText': receiptText}),
+    );
+    if (response.statusCode == 200) {
+      return json.decode(response.body);
+    }
+    throw Exception('Failed to parse receipt');
+  }
+
+  static Future<dynamic> adjustStock(int ingredientId, double newStock, {String? reason}) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/ingredients/$ingredientId/adjust-stock'),
+      headers: {'Content-Type': 'application/json'},
+      body: json.encode({
+        'newStock': newStock,
+        if (reason != null) 'reason': reason,
+      }),
+    );
+    if (response.statusCode == 200) {
+      return json.decode(response.body);
+    }
+    throw Exception('Failed to adjust stock');
+  }
 }
 
 // Providers
@@ -403,6 +491,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _NavItem(Icons.point_of_sale_rounded, 'Sales'),
     _NavItem(Icons.delete_sweep_rounded, 'Waste'),
     _NavItem(Icons.calculate_rounded, 'Deductions'),
+    _NavItem(Icons.add_shopping_cart_rounded, 'Stock In'),
   ];
 
   final List<Widget> _screens = const [
@@ -413,6 +502,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     SalesTrackingScreen(),
     WasteTrackingScreen(),
     StockDeductionScreen(),
+    StockManagementScreen(),
   ];
 
   @override
@@ -490,6 +580,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
                         _drawerTile(4),
                         _drawerTile(5),
                         _drawerTile(6),
+                        const Divider(height: 24, indent: 16, endIndent: 16),
+                        _drawerSection('STOCK'),
+                        _drawerTile(7),
                       ],
                     ),
                   ),
@@ -3027,6 +3120,978 @@ class _IngredientManagementScreenState extends State<IngredientManagementScreen>
             child: const Text('Delete'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ========== STOCK MANAGEMENT SCREEN ==========
+
+class StockManagementScreen extends StatefulWidget {
+  const StockManagementScreen({super.key});
+
+  @override
+  State<StockManagementScreen> createState() => _StockManagementScreenState();
+}
+
+class _StockManagementScreenState extends State<StockManagementScreen> with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  List<dynamic> _stockIns = [];
+  List<dynamic> _ingredients = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(length: 3, vsync: this);
+    _loadData();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadData() async {
+    setState(() => _loading = true);
+    try {
+      final results = await Future.wait([
+        ApiService.getStockIns(),
+        ApiService.getIngredients(),
+      ]);
+      _stockIns = results[0];
+      _ingredients = results[1];
+    } catch (e) {
+      debugPrint('Error loading stock data: $e');
+    }
+    setState(() => _loading = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          color: Theme.of(context).colorScheme.surface,
+          child: TabBar(
+            controller: _tabController,
+            labelColor: const Color(0xFF1B5E20),
+            unselectedLabelColor: Colors.grey[600],
+            indicatorColor: const Color(0xFF1B5E20),
+            tabs: const [
+              Tab(icon: Icon(Icons.add_shopping_cart), text: 'Stock In'),
+              Tab(icon: Icon(Icons.document_scanner), text: 'Scan Receipt'),
+              Tab(icon: Icon(Icons.history), text: 'History'),
+            ],
+          ),
+        ),
+        Expanded(
+          child: _loading
+              ? const Center(child: CircularProgressIndicator())
+              : TabBarView(
+                  controller: _tabController,
+                  children: [
+                    _StockInTab(
+                      ingredients: _ingredients,
+                      onStockAdded: _loadData,
+                    ),
+                    _ReceiptScanTab(
+                      ingredients: _ingredients,
+                      onStockAdded: _loadData,
+                    ),
+                    _StockHistoryTab(
+                      stockIns: _stockIns,
+                      onRefresh: _loadData,
+                    ),
+                  ],
+                ),
+        ),
+      ],
+    );
+  }
+}
+
+// ─── Stock In Tab ────────────────────────────────────────────────────────────
+
+class _StockInTab extends StatefulWidget {
+  final List<dynamic> ingredients;
+  final VoidCallback onStockAdded;
+
+  const _StockInTab({required this.ingredients, required this.onStockAdded});
+
+  @override
+  State<_StockInTab> createState() => _StockInTabState();
+}
+
+class _StockInTabState extends State<_StockInTab> {
+  int? _selectedIngredientId;
+  final _quantityCtrl = TextEditingController();
+  final _unitCostCtrl = TextEditingController();
+  final _supplierCtrl = TextEditingController();
+  final _invoiceCtrl = TextEditingController();
+  final _notesCtrl = TextEditingController();
+  bool _submitting = false;
+
+  // For stock count adjustment
+  final _newStockCtrl = TextEditingController();
+  final _reasonCtrl = TextEditingController();
+  int? _adjustIngredientId;
+
+  @override
+  void dispose() {
+    _quantityCtrl.dispose();
+    _unitCostCtrl.dispose();
+    _supplierCtrl.dispose();
+    _invoiceCtrl.dispose();
+    _notesCtrl.dispose();
+    _newStockCtrl.dispose();
+    _reasonCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submitStockIn() async {
+    if (_selectedIngredientId == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select an ingredient'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+    final qty = double.tryParse(_quantityCtrl.text);
+    if (qty == null || qty <= 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid quantity'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    setState(() => _submitting = true);
+    try {
+      await ApiService.createStockIn(
+        ingredientId: _selectedIngredientId!,
+        quantity: qty,
+        unitCost: double.tryParse(_unitCostCtrl.text),
+        supplier: _supplierCtrl.text.isNotEmpty ? _supplierCtrl.text : null,
+        invoiceRef: _invoiceCtrl.text.isNotEmpty ? _invoiceCtrl.text : null,
+        notes: _notesCtrl.text.isNotEmpty ? _notesCtrl.text : null,
+        source: 'manual',
+      );
+      _quantityCtrl.clear();
+      _unitCostCtrl.clear();
+      _supplierCtrl.clear();
+      _invoiceCtrl.clear();
+      _notesCtrl.clear();
+      widget.onStockAdded();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Stock added successfully!'), backgroundColor: Colors.green),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+    setState(() => _submitting = false);
+  }
+
+  Future<void> _submitStockAdjust() async {
+    if (_adjustIngredientId == null) return;
+    final newStock = double.tryParse(_newStockCtrl.text);
+    if (newStock == null || newStock < 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid stock count'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+    setState(() => _submitting = true);
+    try {
+      await ApiService.adjustStock(
+        _adjustIngredientId!,
+        newStock,
+        reason: _reasonCtrl.text.isNotEmpty ? _reasonCtrl.text : null,
+      );
+      _newStockCtrl.clear();
+      _reasonCtrl.clear();
+      setState(() => _adjustIngredientId = null);
+      widget.onStockAdded();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Stock count adjusted!'), backgroundColor: Colors.green),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+    setState(() => _submitting = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // ── Add Stock Card ──
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.add_shopping_cart, color: Colors.green[700]),
+                      const SizedBox(width: 8),
+                      const Text('Add Stock', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text('Record received stock for an ingredient', style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<int>(
+                    value: _selectedIngredientId,
+                    decoration: const InputDecoration(
+                      labelText: 'Ingredient',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.inventory_2),
+                    ),
+                    items: widget.ingredients.map<DropdownMenuItem<int>>((ing) {
+                      return DropdownMenuItem<int>(
+                        value: ing['id'],
+                        child: Text('${ing['name']} (${ing['unit']}) — Stock: ${(ing['currentStock'] as num).toStringAsFixed(1)}'),
+                      );
+                    }).toList(),
+                    onChanged: (v) => setState(() => _selectedIngredientId = v),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _quantityCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Quantity',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.numbers),
+                          ),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextField(
+                          controller: _unitCostCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Unit Cost (\$)',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.attach_money),
+                          ),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _supplierCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Supplier (optional)',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.store),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextField(
+                          controller: _invoiceCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Invoice # (optional)',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.receipt_long),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _notesCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Notes (optional)',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.notes),
+                    ),
+                    maxLines: 2,
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _submitting ? null : _submitStockIn,
+                      icon: _submitting
+                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.add),
+                      label: const Text('Add Stock'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF1B5E20),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // ── Stock Count / Physical Adjustment Card ──
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.fact_check, color: Colors.blue[700]),
+                      const SizedBox(width: 8),
+                      const Text('Stock Count Adjustment', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text('Set the actual stock level after a physical count', style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                  const SizedBox(height: 16),
+                  DropdownButtonFormField<int>(
+                    value: _adjustIngredientId,
+                    decoration: const InputDecoration(
+                      labelText: 'Ingredient',
+                      border: OutlineInputBorder(),
+                      prefixIcon: Icon(Icons.inventory_2),
+                    ),
+                    items: widget.ingredients.map<DropdownMenuItem<int>>((ing) {
+                      return DropdownMenuItem<int>(
+                        value: ing['id'],
+                        child: Text('${ing['name']} — Current: ${(ing['currentStock'] as num).toStringAsFixed(1)} ${ing['unit']}'),
+                      );
+                    }).toList(),
+                    onChanged: (v) => setState(() => _adjustIngredientId = v),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _newStockCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Actual Stock Count',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.inventory),
+                          ),
+                          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextField(
+                          controller: _reasonCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Reason (optional)',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.note_alt),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _submitting ? null : _submitStockAdjust,
+                      icon: _submitting
+                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.sync),
+                      label: const Text('Update Stock Count'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue[700],
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // ── Current Inventory Overview ──
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.warehouse, color: Colors.orange[700]),
+                      const SizedBox(width: 8),
+                      const Text('Current Stock Levels', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  ...widget.ingredients.map<Widget>((ing) {
+                    final stock = (ing['currentStock'] as num).toDouble();
+                    final par = (ing['parLevel'] as num).toDouble();
+                    final pct = par > 0 ? (stock / par).clamp(0.0, 2.0) / 2.0 : 0.5;
+                    final isLow = stock < par;
+                    final isCritical = stock == 0;
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Row(
+                        children: [
+                          Icon(
+                            isCritical ? Icons.error : isLow ? Icons.warning : Icons.check_circle,
+                            color: isCritical ? Colors.red : isLow ? Colors.orange : Colors.green,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            flex: 2,
+                            child: Text(ing['name'], style: const TextStyle(fontWeight: FontWeight.w500)),
+                          ),
+                          Expanded(
+                            flex: 3,
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: LinearProgressIndicator(
+                                value: pct,
+                                backgroundColor: Colors.grey[200],
+                                color: isCritical ? Colors.red : isLow ? Colors.orange : Colors.green,
+                                minHeight: 8,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          SizedBox(
+                            width: 120,
+                            child: Text(
+                              '${stock.toStringAsFixed(1)} / ${par.toStringAsFixed(0)} ${ing['unit']}',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: isCritical ? Colors.red : isLow ? Colors.orange : Colors.grey[700],
+                              ),
+                              textAlign: TextAlign.right,
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Receipt Scan Tab ────────────────────────────────────────────────────────
+
+class _ReceiptScanTab extends StatefulWidget {
+  final List<dynamic> ingredients;
+  final VoidCallback onStockAdded;
+
+  const _ReceiptScanTab({required this.ingredients, required this.onStockAdded});
+
+  @override
+  State<_ReceiptScanTab> createState() => _ReceiptScanTabState();
+}
+
+class _ReceiptScanTabState extends State<_ReceiptScanTab> {
+  final _receiptCtrl = TextEditingController();
+  final _supplierCtrl = TextEditingController();
+  final _invoiceCtrl = TextEditingController();
+  List<dynamic>? _parsedItems;
+  bool _parsing = false;
+  bool _submitting = false;
+
+  // Editable parsed results
+  List<Map<String, dynamic>> _editableItems = [];
+
+  @override
+  void dispose() {
+    _receiptCtrl.dispose();
+    _supplierCtrl.dispose();
+    _invoiceCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _parseReceipt() async {
+    if (_receiptCtrl.text.trim().isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please paste or type receipt text'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    setState(() => _parsing = true);
+    try {
+      final result = await ApiService.parseReceipt(_receiptCtrl.text);
+      _parsedItems = result['parsed'] as List<dynamic>;
+      _editableItems = _parsedItems!.map<Map<String, dynamic>>((item) {
+        return {
+          'line': item['line'],
+          'ingredientId': item['ingredientId'],
+          'ingredientName': item['ingredientName'],
+          'quantity': item['quantity'],
+          'unitCost': item['unitCost'],
+          'totalCost': item['totalCost'],
+          'confidence': item['confidence'],
+          'include': item['ingredientId'] != null && item['quantity'] != null,
+        };
+      }).toList();
+      setState(() {});
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error parsing receipt: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+    setState(() => _parsing = false);
+  }
+
+  Future<void> _submitParsed() async {
+    final itemsToSubmit = _editableItems
+        .where((item) => item['include'] == true && item['ingredientId'] != null && item['quantity'] != null)
+        .map<Map<String, dynamic>>((item) {
+          final m = <String, dynamic>{
+            'ingredientId': item['ingredientId'],
+            'quantity': (item['quantity'] as num).toDouble(),
+          };
+          if (item['unitCost'] != null) m['unitCost'] = (item['unitCost'] as num).toDouble();
+          return m;
+        })
+        .toList();
+
+    if (itemsToSubmit.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No valid items selected'), backgroundColor: Colors.orange),
+      );
+      return;
+    }
+
+    setState(() => _submitting = true);
+    try {
+      await ApiService.bulkStockIn(
+        items: itemsToSubmit,
+        supplier: _supplierCtrl.text.isNotEmpty ? _supplierCtrl.text : null,
+        invoiceRef: _invoiceCtrl.text.isNotEmpty ? _invoiceCtrl.text : null,
+      );
+      _receiptCtrl.clear();
+      _supplierCtrl.clear();
+      _invoiceCtrl.clear();
+      setState(() {
+        _parsedItems = null;
+        _editableItems = [];
+      });
+      widget.onStockAdded();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('${itemsToSubmit.length} items stocked in successfully!'),
+            backgroundColor: Colors.green,
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
+    setState(() => _submitting = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.document_scanner, color: Colors.purple[700]),
+                      const SizedBox(width: 8),
+                      const Text('Receipt / Invoice Scanner', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Paste the text from a receipt or invoice below. The system will match items to your ingredients and extract quantities.',
+                    style: TextStyle(color: Colors.grey[600], fontSize: 13),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: _supplierCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Supplier',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.store),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: TextField(
+                          controller: _invoiceCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Invoice #',
+                            border: OutlineInputBorder(),
+                            prefixIcon: Icon(Icons.receipt_long),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _receiptCtrl,
+                    decoration: InputDecoration(
+                      labelText: 'Paste receipt text here',
+                      hintText: 'e.g.\nBeef 10kg \$80.00\nBun 100 pcs \$50.00\nLettuce 5kg \$10.00',
+                      border: const OutlineInputBorder(),
+                      prefixIcon: const Icon(Icons.text_snippet),
+                      alignLabelWithHint: true,
+                    ),
+                    maxLines: 8,
+                    minLines: 5,
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      onPressed: _parsing ? null : _parseReceipt,
+                      icon: _parsing
+                          ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                          : const Icon(Icons.search),
+                      label: const Text('Parse Receipt'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.purple[700],
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 14),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // ── Parsed Results ──
+          if (_editableItems.isNotEmpty) ...[
+            const SizedBox(height: 20),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.checklist, color: Colors.green[700]),
+                        const SizedBox(width: 8),
+                        const Text('Parsed Items', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                        const Spacer(),
+                        Text(
+                          '${_editableItems.where((e) => e['include'] == true).length} selected',
+                          style: TextStyle(color: Colors.grey[600], fontSize: 13),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text('Review and confirm items to stock in. Uncheck items you want to skip.',
+                        style: TextStyle(color: Colors.grey[600], fontSize: 13)),
+                    const SizedBox(height: 12),
+                    ..._editableItems.asMap().entries.map((entry) {
+                      final idx = entry.key;
+                      final item = entry.value;
+                      final canInclude = item['ingredientId'] != null && item['quantity'] != null;
+                      return Container(
+                        margin: const EdgeInsets.symmetric(vertical: 4),
+                        decoration: BoxDecoration(
+                          color: item['include'] == true
+                              ? Colors.green.withOpacity(0.05)
+                              : Colors.grey.withOpacity(0.05),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(
+                            color: item['include'] == true ? Colors.green.withOpacity(0.3) : Colors.grey.withOpacity(0.2),
+                          ),
+                        ),
+                        child: CheckboxListTile(
+                          value: item['include'] == true,
+                          onChanged: canInclude
+                              ? (v) => setState(() => _editableItems[idx]['include'] = v)
+                              : null,
+                          controlAffinity: ListTileControlAffinity.leading,
+                          title: Text(
+                            item['ingredientName'] ?? 'Unknown',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: canInclude ? null : Colors.grey,
+                            ),
+                          ),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('Receipt: "${item['line']}"',
+                                  style: TextStyle(fontSize: 11, color: Colors.grey[500], fontStyle: FontStyle.italic)),
+                              const SizedBox(height: 2),
+                              Row(
+                                children: [
+                                  if (item['quantity'] != null)
+                                    _chipInfo('Qty: ${item['quantity']}', Colors.blue),
+                                  if (item['unitCost'] != null)
+                                    _chipInfo('Unit: \$${(item['unitCost'] as num).toStringAsFixed(2)}', Colors.orange),
+                                  if (item['totalCost'] != null)
+                                    _chipInfo('Total: \$${(item['totalCost'] as num).toStringAsFixed(2)}', Colors.green),
+                                  _chipInfo(
+                                    item['confidence'] ?? 'none',
+                                    item['confidence'] == 'high' ? Colors.green : Colors.orange,
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                          isThreeLine: true,
+                          secondary: canInclude
+                              ? null
+                              : IconButton(
+                                  icon: const Icon(Icons.edit, size: 18),
+                                  tooltip: 'Manually assign',
+                                  onPressed: () => _manuallyAssignItem(idx),
+                                ),
+                        ),
+                      );
+                    }),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: _submitting ? null : _submitParsed,
+                        icon: _submitting
+                            ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                            : const Icon(Icons.check),
+                        label: Text('Confirm & Stock In (${_editableItems.where((e) => e['include'] == true).length} items)'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF1B5E20),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _chipInfo(String label, Color color) {
+    return Container(
+      margin: const EdgeInsets.only(right: 6, top: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Text(label, style: TextStyle(fontSize: 11, color: color, fontWeight: FontWeight.w600)),
+    );
+  }
+
+  void _manuallyAssignItem(int idx) {
+    int? selectedId;
+    final qtyCtrl = TextEditingController(text: _editableItems[idx]['quantity']?.toString() ?? '');
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Assign Ingredient'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text('Line: "${_editableItems[idx]['line']}"',
+                style: TextStyle(fontSize: 12, color: Colors.grey[600], fontStyle: FontStyle.italic)),
+            const SizedBox(height: 12),
+            DropdownButtonFormField<int>(
+              decoration: const InputDecoration(labelText: 'Ingredient', border: OutlineInputBorder()),
+              items: widget.ingredients.map<DropdownMenuItem<int>>((ing) {
+                return DropdownMenuItem<int>(value: ing['id'], child: Text(ing['name']));
+              }).toList(),
+              onChanged: (v) => selectedId = v,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: qtyCtrl,
+              decoration: const InputDecoration(labelText: 'Quantity', border: OutlineInputBorder()),
+              keyboardType: const TextInputType.numberWithOptions(decimal: true),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              if (selectedId != null && qtyCtrl.text.isNotEmpty) {
+                final ing = widget.ingredients.firstWhere((i) => i['id'] == selectedId);
+                setState(() {
+                  _editableItems[idx]['ingredientId'] = selectedId;
+                  _editableItems[idx]['ingredientName'] = ing['name'];
+                  _editableItems[idx]['quantity'] = double.tryParse(qtyCtrl.text);
+                  _editableItems[idx]['include'] = true;
+                  _editableItems[idx]['confidence'] = 'manual';
+                });
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('Assign'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Stock History Tab ───────────────────────────────────────────────────────
+
+class _StockHistoryTab extends StatelessWidget {
+  final List<dynamic> stockIns;
+  final VoidCallback onRefresh;
+
+  const _StockHistoryTab({required this.stockIns, required this.onRefresh});
+
+  @override
+  Widget build(BuildContext context) {
+    if (stockIns.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.history, size: 64, color: Colors.grey[300]),
+            const SizedBox(height: 12),
+            Text('No stock-in records yet', style: TextStyle(color: Colors.grey[500], fontSize: 16)),
+            const SizedBox(height: 4),
+            Text('Add stock or scan a receipt to get started', style: TextStyle(color: Colors.grey[400], fontSize: 13)),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: () async => onRefresh(),
+      child: ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: stockIns.length,
+        itemBuilder: (ctx, i) {
+          final s = stockIns[i];
+          final ingredient = s['ingredient'];
+          final createdAt = DateTime.tryParse(s['createdAt'] ?? '');
+          final dateStr = createdAt != null
+              ? '${createdAt.month}/${createdAt.day}/${createdAt.year} ${createdAt.hour.toString().padLeft(2, '0')}:${createdAt.minute.toString().padLeft(2, '0')}'
+              : '';
+
+          IconData sourceIcon;
+          Color sourceColor;
+          switch (s['source']) {
+            case 'receipt_scan':
+              sourceIcon = Icons.document_scanner;
+              sourceColor = Colors.purple;
+              break;
+            case 'stock_count':
+              sourceIcon = Icons.fact_check;
+              sourceColor = Colors.blue;
+              break;
+            case 'purchase_order':
+              sourceIcon = Icons.shopping_bag;
+              sourceColor = Colors.orange;
+              break;
+            default:
+              sourceIcon = Icons.add_shopping_cart;
+              sourceColor = Colors.green;
+          }
+
+          return Card(
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            child: ListTile(
+              leading: CircleAvatar(
+                backgroundColor: sourceColor.withOpacity(0.15),
+                child: Icon(sourceIcon, color: sourceColor, size: 20),
+              ),
+              title: Text(
+                ingredient?['name'] ?? 'Unknown',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              subtitle: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('+${(s['quantity'] as num).toStringAsFixed(1)} ${ingredient?['unit'] ?? ''}',
+                      style: TextStyle(color: Colors.green[700], fontWeight: FontWeight.w600)),
+                  Row(
+                    children: [
+                      Text(dateStr, style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                      if (s['supplier'] != null) ...[
+                        const SizedBox(width: 8),
+                        Text('| ${s['supplier']}', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                      ],
+                      if (s['invoiceRef'] != null) ...[
+                        const SizedBox(width: 8),
+                        Text('Inv: ${s['invoiceRef']}', style: TextStyle(fontSize: 11, color: Colors.grey[500])),
+                      ],
+                    ],
+                  ),
+                  if (s['notes'] != null && (s['notes'] as String).isNotEmpty)
+                    Text(s['notes'], style: TextStyle(fontSize: 11, color: Colors.grey[600], fontStyle: FontStyle.italic)),
+                ],
+              ),
+              trailing: s['totalCost'] != null
+                  ? Text('\$${(s['totalCost'] as num).toStringAsFixed(2)}',
+                      style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.green))
+                  : null,
+              isThreeLine: true,
+            ),
+          );
+        },
       ),
     );
   }

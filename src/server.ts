@@ -87,6 +87,12 @@ app.get("/", (_req, res) =>
       "POST /waste-logs",
       "DELETE /waste-logs/:id",
       "GET  /stock-deductions/:menuItemId",
+      "GET  /stock-ins",
+      "POST /stock-ins",
+      "POST /stock-ins/bulk",
+      "DELETE /stock-ins/:id",
+      "POST /stock-ins/parse-receipt",
+      "POST /ingredients/:id/adjust-stock",
     ],
   })
 );
@@ -507,6 +513,259 @@ app.get("/waste-logs/summary", async (req, res) => {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : "Failed to generate waste summary";
+    res.status(500).json({ error: message });
+  }
+});
+
+// ── Stock-In (Stock Taking) ────────────────────────────────────────────────
+
+// List stock-in records
+app.get("/stock-ins", async (req, res) => {
+  const days = Number(req.query.days) || 90;
+  const ingredientId = req.query.ingredientId ? Number(req.query.ingredientId) : undefined;
+  try {
+    const cutoffDate = new Date();
+    cutoffDate.setDate(cutoffDate.getDate() - days);
+    const where: any = { createdAt: { gte: cutoffDate } };
+    if (ingredientId) where.ingredientId = ingredientId;
+    const stockIns = await prisma.stockIn.findMany({
+      where,
+      include: { ingredient: true },
+      orderBy: { createdAt: "desc" },
+    });
+    res.json(stockIns);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to fetch stock-ins";
+    res.status(500).json({ error: message });
+  }
+});
+
+// Create a single stock-in record and update ingredient stock
+app.post("/stock-ins", async (req, res) => {
+  const { ingredientId, quantity, unitCost, totalCost, source, invoiceRef, supplier, notes } = req.body;
+  if (!ingredientId || typeof quantity !== "number" || quantity <= 0) {
+    return res.status(400).json({ error: "ingredientId and positive quantity required" });
+  }
+  try {
+    const stockIn = await prisma.stockIn.create({
+      data: {
+        ingredientId,
+        quantity,
+        unitCost: unitCost ?? null,
+        totalCost: totalCost ?? (unitCost ? unitCost * quantity : null),
+        source: source || "manual",
+        invoiceRef: invoiceRef ?? null,
+        supplier: supplier ?? null,
+        notes: notes ?? null,
+      },
+      include: { ingredient: true },
+    });
+    // Update ingredient current stock
+    const updated = await prisma.ingredient.update({
+      where: { id: ingredientId },
+      data: {
+        currentStock: { increment: quantity },
+        ...(unitCost !== undefined ? { unitCost } : {}),
+      },
+    });
+    io.emit('inventory_update', { message: 'Stock added', ingredientId, quantity, newStock: updated.currentStock });
+    res.status(201).json({ stockIn, ingredient: updated });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to create stock-in";
+    res.status(500).json({ error: message });
+  }
+});
+
+// Bulk stock-in (multiple ingredients at once, e.g. from a receipt)
+app.post("/stock-ins/bulk", async (req, res) => {
+  const { items, invoiceRef, supplier, source } = req.body;
+  // items: Array<{ ingredientId: number; quantity: number; unitCost?: number }>
+  if (!Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: "items array is required" });
+  }
+  try {
+    const results = [];
+    for (const item of items) {
+      if (!item.ingredientId || typeof item.quantity !== "number" || item.quantity <= 0) {
+        results.push({ error: `Invalid item: ${JSON.stringify(item)}` });
+        continue;
+      }
+      const stockIn = await prisma.stockIn.create({
+        data: {
+          ingredientId: item.ingredientId,
+          quantity: item.quantity,
+          unitCost: item.unitCost ?? null,
+          totalCost: item.unitCost ? item.unitCost * item.quantity : null,
+          source: source || "receipt_scan",
+          invoiceRef: invoiceRef ?? null,
+          supplier: supplier ?? null,
+          notes: item.notes ?? null,
+        },
+        include: { ingredient: true },
+      });
+      await prisma.ingredient.update({
+        where: { id: item.ingredientId },
+        data: {
+          currentStock: { increment: item.quantity },
+          ...(item.unitCost !== undefined ? { unitCost: item.unitCost } : {}),
+        },
+      });
+      results.push(stockIn);
+    }
+    io.emit('inventory_update', { message: 'Bulk stock added', count: results.length });
+    res.status(201).json({ success: true, count: results.length, results });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to process bulk stock-in";
+    res.status(500).json({ error: message });
+  }
+});
+
+// Delete a stock-in record (does NOT reverse the stock change)
+app.delete("/stock-ins/:id", async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    await prisma.stockIn.delete({ where: { id } });
+    res.status(204).send();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to delete stock-in";
+    res.status(500).json({ error: message });
+  }
+});
+
+// Parse receipt text and match to existing ingredients
+app.post("/stock-ins/parse-receipt", async (req, res) => {
+  const { receiptText } = req.body;
+  if (!receiptText || typeof receiptText !== "string") {
+    return res.status(400).json({ error: "receiptText is required" });
+  }
+  try {
+    // Get all ingredients for matching
+    const ingredients = await prisma.ingredient.findMany();
+
+    // Parse lines from receipt text
+    const lines = receiptText.split("\n").map(l => l.trim()).filter(l => l.length > 0);
+    const parsed: Array<{
+      line: string;
+      ingredientId: number | null;
+      ingredientName: string | null;
+      quantity: number | null;
+      unitCost: number | null;
+      totalCost: number | null;
+      confidence: string;
+    }> = [];
+
+    for (const line of lines) {
+      // Try to extract quantity and price from typical receipt formats:
+      // e.g. "Beef 5kg $40.00", "10 x Lettuce @ $2.00", "Buns 50 pcs $25"
+      const numberPattern = /([\d]+\.?[\d]*)\s*/g;
+      const numbers = [...line.matchAll(numberPattern)].map(m => parseFloat(m[1]));
+
+      // Try to match ingredient name (case-insensitive, partial match)
+      let matchedIngredient: typeof ingredients[0] | null = null;
+      let bestScore = 0;
+      for (const ing of ingredients) {
+        const nameLower = ing.name.toLowerCase();
+        const lineLower = line.toLowerCase();
+        if (lineLower.includes(nameLower)) {
+          const score = nameLower.length;
+          if (score > bestScore) {
+            bestScore = score;
+            matchedIngredient = ing;
+          }
+        }
+      }
+
+      if (matchedIngredient && numbers.length > 0) {
+        // Heuristic: first number is quantity, last number (if different) is total cost
+        const quantity = numbers[0];
+        const totalCost = numbers.length > 1 ? numbers[numbers.length - 1] : null;
+        const unitCost = totalCost && quantity > 0 ? totalCost / quantity : null;
+        parsed.push({
+          line,
+          ingredientId: matchedIngredient.id,
+          ingredientName: matchedIngredient.name,
+          quantity,
+          unitCost: unitCost ? parseFloat(unitCost.toFixed(4)) : null,
+          totalCost,
+          confidence: "high",
+        });
+      } else if (matchedIngredient) {
+        parsed.push({
+          line,
+          ingredientId: matchedIngredient.id,
+          ingredientName: matchedIngredient.name,
+          quantity: null,
+          unitCost: null,
+          totalCost: null,
+          confidence: "low",
+        });
+      } else if (numbers.length > 0) {
+        parsed.push({
+          line,
+          ingredientId: null,
+          ingredientName: null,
+          quantity: numbers[0],
+          unitCost: null,
+          totalCost: numbers.length > 1 ? numbers[numbers.length - 1] : null,
+          confidence: "low",
+        });
+      } else {
+        parsed.push({
+          line,
+          ingredientId: null,
+          ingredientName: null,
+          quantity: null,
+          unitCost: null,
+          totalCost: null,
+          confidence: "none",
+        });
+      }
+    }
+
+    res.json({
+      totalLines: lines.length,
+      matchedLines: parsed.filter(p => p.ingredientId !== null).length,
+      parsed,
+      ingredients: ingredients.map(i => ({ id: i.id, name: i.name, unit: i.unit })),
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to parse receipt";
+    res.status(500).json({ error: message });
+  }
+});
+
+// Adjust stock directly (for stock-taking / physical count)
+app.post("/ingredients/:id/adjust-stock", async (req, res) => {
+  const id = Number(req.params.id);
+  const { newStock, reason } = req.body;
+  if (typeof newStock !== "number" || newStock < 0) {
+    return res.status(400).json({ error: "newStock (>= 0) is required" });
+  }
+  try {
+    const ingredient = await prisma.ingredient.findUnique({ where: { id } });
+    if (!ingredient) return res.status(404).json({ error: "Ingredient not found" });
+
+    const difference = newStock - ingredient.currentStock;
+
+    // Log the adjustment as a stock-in (positive) or note (negative)
+    await prisma.stockIn.create({
+      data: {
+        ingredientId: id,
+        quantity: Math.abs(difference),
+        source: "stock_count",
+        notes: `Stock adjusted from ${ingredient.currentStock} to ${newStock}. Reason: ${reason || "physical count"}.${difference < 0 ? " (Shrinkage)" : ""}`,
+      },
+    });
+
+    const updated = await prisma.ingredient.update({
+      where: { id },
+      data: { currentStock: newStock },
+    });
+
+    io.emit('inventory_update', { message: 'Stock adjusted', ingredientId: id, newStock });
+    res.json({ ingredient: updated, adjustment: difference });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Failed to adjust stock";
     res.status(500).json({ error: message });
   }
 });
